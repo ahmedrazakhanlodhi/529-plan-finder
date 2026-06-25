@@ -27,6 +27,15 @@ html,body,[class*="css"]{font-family:'Inter',sans-serif;}
 .plan-card{border-left:5px solid #3A8916;background:#f8fbf6;border-radius:0 10px 10px 0;padding:1.2rem 1.4rem;margin-bottom:1.2rem;}
 .plan-card.rank-1{border-left-color:#2B650B;background:#f2f9ed;}
 .plan-card.rank-3{border-left-color:#708686;background:#f5f7f7;}
+.home-plan-card{border:2px solid #3A8916;background:#f2f9ed;border-radius:12px;padding:1.4rem 1.6rem;margin-bottom:1rem;}
+.home-plan-banner{display:inline-block;background:#2B650B;color:white;font-size:.72rem;font-weight:700;letter-spacing:.04em;padding:3px 12px;border-radius:20px;margin-bottom:10px;text-transform:uppercase;}
+.neutral-plan-card{border:1px solid #d8e3d2;background:#ffffff;border-radius:10px;padding:1.1rem 1.3rem;margin-bottom:.9rem;}
+.neutral-plan-card:hover{border-color:#C6DDBB;box-shadow:0 2px 8px rgba(58,137,22,0.06);}
+.tax-callout{background:#d4edda;border-radius:6px;padding:.5rem .8rem;font-size:.88rem;color:#2B650B;font-weight:600;margin:8px 0;}
+.neutrality-note{background:#f5f7f5;border:1px solid #e0e8e0;border-radius:8px;padding:.8rem 1rem;font-size:.8rem;color:#708686;margin-bottom:1rem;line-height:1.5;}
+.fact-grid{display:flex;gap:24px;flex-wrap:wrap;font-size:.85rem;margin:10px 0;}
+.fact-grid .lbl{color:#708686;display:block;font-size:.76rem;}
+.fact-grid .val{color:#1A1A1A;font-weight:600;}
 .match-bar-outer{background:#e0e8e0;border-radius:4px;height:8px;width:100%;margin:4px 0 10px;}
 .match-bar-inner{background:linear-gradient(90deg,#3A8916,#2B650B);border-radius:4px;height:8px;}
 .badge{display:inline-block;background:#C6DDBB;color:#2B650B;font-size:.72rem;font-weight:600;padding:2px 9px;border-radius:12px;margin-right:5px;margin-bottom:5px;}
@@ -265,19 +274,56 @@ def screen_questionnaire():
 
     footer()
 
+def _sort_other_plans(plans, priority_1):
+    """Sort the non-home plans by the OBJECTIVE factor the user prioritized.
+    No composite 'match score' is used \u2014 the user sets the axis, we sort by fact."""
+    from utils.scoring import PRIORITY_MAP
+    dim = PRIORITY_MAP.get(priority_1, "")
+    if dim == "fee":
+        return sorted(plans, key=lambda p: p.get("avg_expense_ratio", 1.0)), "sorted_by_fees"
+    if dim in ("investment", "rating"):
+        rating_order = {"Gold": 0, "Silver": 1, "Bronze": 2, "Neutral": 3, "NR": 4}
+        return (sorted(plans, key=lambda p: (rating_order.get(p.get("morningstar_rating", "NR"), 4),
+                                             p.get("avg_expense_ratio", 1.0))),
+                "sorted_by_rating")
+    if dim == "tax":
+        return sorted(plans, key=lambda p: p["name"]), "sorted_by_tax"
+    return sorted(plans, key=lambda p: p["name"]), "sorted_by_default"
+
 def _compute_results():
-    ranked = score_plans(st.session_state.answers)
-    top3 = ranked[:3]
-    for i,p in enumerate(top3):
-        p["explanation"] = generate_explanation(p, st.session_state.answers, i+1, lang)
-    st.session_state.results = top3
+    from utils.knowledge_base import STATE_PLAN_IDS, PLAN_BY_ID
+    answers = st.session_state.answers
+    state = answers.get("state", "")
+    ranked = score_plans(answers)
+
+    # Separate the home-state plan (surfaced as disclosure, never ranked)
+    home_id = STATE_PLAN_IDS.get(state)
+    home_plan = next((p for p in ranked if p["id"] == home_id), None) if home_id else None
+
+    # Curated list of other plans: exclude the home plan to avoid duplication,
+    # exclude residency-locked plans, then sort by the user's chosen objective factor.
+    others_pool = [p for p in ranked
+                   if p["id"] != home_id
+                   and not p.get("residency_required")
+                   and not p.get("is_prepaid")]
+    sorted_others, sort_key = _sort_other_plans(others_pool, answers.get("priority_1", ""))
+    other_plans = sorted_others[:4]   # curated, not exhaustive
+
+    st.session_state.home_plan = home_plan
+    st.session_state.other_plans = other_plans
+    st.session_state.other_sort_key = sort_key
     st.session_state.all_results = ranked
-    email = st.session_state.answers.get("email","")
+    # Keep a combined list for the PDF (home first, then others)
+    if home_plan:
+        home_plan["_is_home"] = True
+    pdf_plans = ([home_plan] if home_plan else []) + other_plans
+
+    email = answers.get("email", "")
     if email:
         try:
             from utils.pdf_generator import generate_pdf
             from utils.email_sender import send_results_email
-            pdf = generate_pdf(st.session_state.answers, top3, lang)
+            pdf = generate_pdf(answers, pdf_plans[:4], lang)
             ok = send_results_email(email, pdf, lang)
             st.session_state.email_sent = ok
             st.session_state.email_failed = not ok
@@ -286,46 +332,79 @@ def _compute_results():
     st.session_state.screen = "results"; st.rerun()
 
 # ── RESULTS ────────────────────────────────────────────────────────────────────
+# Fallback in-state annual cost of attendance (used only if data/college_costs.csv is absent)
+_FALLBACK_INSTATE_ANNUAL = {
+    "AL":26800,"AK":27800,"AZ":27200,"AR":23600,"CA":36000,"CO":30600,
+    "CT":36800,"DC":45000,"DE":30400,"FL":21800,"GA":26200,"HI":29600,
+    "ID":23200,"IL":31400,"IN":27800,"IA":25400,"KS":24800,"KY":25200,
+    "LA":23800,"ME":30200,"MD":32400,"MA":38600,"MI":29400,"MN":28600,
+    "MS":21400,"MO":26200,"MT":25600,"NE":24600,"NV":22800,"NH":34600,
+    "NJ":35200,"NM":21600,"NY":32400,"NC":24400,"ND":23800,"OH":28400,
+    "OK":22800,"OR":30800,"PA":34200,"RI":36400,"SC":27000,"SD":24400,
+    "TN":25600,"TX":26400,"UT":21800,"VT":40600,"VA":30200,"WA":27400,
+    "WV":22400,"WI":27600,"WY":16400,
+}
+
+@st.cache_data
+def _load_instate_costs():
+    """
+    Load per-state average annual cost of attendance from the shared
+    data/college_costs.csv (College Scorecard, the same source the 529
+    Intelligence Dashboard uses). Returns (cost_map, source_label).
+    Falls back to a built-in table if the file is missing or unreadable.
+    """
+    import os, csv
+    path = os.path.join(os.path.dirname(__file__), "data", "college_costs.csv")
+    try:
+        costs = {}
+        with open(path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                st_abbr = (row.get("State") or "").strip().upper()
+                val = row.get("cost_dollars")
+                if st_abbr and val:
+                    costs[st_abbr] = float(val)
+        if len(costs) >= 45:
+            return costs, "college_scorecard"
+    except Exception:
+        pass
+    return dict(_FALLBACK_INSTATE_ANNUAL), "fallback"
+
 def _get_college_costs(state):
     """
-    Real 4-year total cost of attendance by state and school type.
-    Source: College Board Trends in College Pricing 2025, educationdata.org state data.
-    All figures are 4-year totals (tuition + fees + room + board + books).
-    Inflation assumption: 3% per year applied to project forward from 2025 base.
+    4-year total cost of attendance by school type, derived from the
+    shared per-state College Scorecard annual figure (one source of truth
+    with the 529 Intelligence Dashboard).
+
+    The CSV gives one blended annual cost per state, which we treat as the
+    in-state public baseline. Other school types are derived from it with
+    documented multipliers. Community college is a 2-year total; the rest
+    are 4-year totals.
     """
-    # State-specific in-state public 4-year (annual COA 2025, x4 for total)
-    # Source: educationdata.org/average-cost-of-college-by-state
-    instate_annual = {
-        "AL":26800,"AK":27800,"AZ":27200,"AR":23600,"CA":36000,"CO":30600,
-        "CT":36800,"DC":45000,"DE":30400,"FL":21800,"GA":26200,"HI":29600,
-        "ID":23200,"IL":31400,"IN":27800,"IA":25400,"KS":24800,"KY":25200,
-        "LA":23800,"ME":30200,"MD":32400,"MA":38600,"MI":29400,"MN":28600,
-        "MS":21400,"MO":26200,"MT":25600,"NE":24600,"NV":22800,"NH":34600,
-        "NJ":35200,"NM":21600,"NY":32400,"NC":24400,"ND":23800,"OH":28400,
-        "OK":22800,"OR":30800,"PA":34200,"RI":36400,"SC":27000,"SD":24400,
-        "TN":25600,"TX":26400,"UT":21800,"VT":40600,"VA":30200,"WA":27400,
-        "WV":22400,"WI":27600,"WY":16400,
-    }
-    # Out-of-state premium is roughly 2x tuition difference; avg OOS annual ~$45k
-    oos_annual = {k: min(v * 1.55, 55000) for k, v in instate_annual.items()}
-    # Private: national avg $63k/yr; state variation ±20%
-    private_premium = {
-        "MA":1.35,"NY":1.28,"CT":1.25,"CA":1.20,"DC":1.22,"NJ":1.18,
-        "PA":1.12,"IL":1.08,"WA":1.05,"CO":1.03,"TX":0.96,"FL":0.94,
-        "GA":0.93,"NC":0.95,"VA":0.98,"OH":0.96,"MI":0.95,"MN":0.97,
-        "UT":0.75,"WY":0.80,"ID":0.82,"MS":0.80,"AR":0.82,
-    }
-    private_base = 63000
-    private_annual = {k: private_base * private_premium.get(k, 1.0) for k in instate_annual}
-    # Community college: national avg $20,600/yr including living costs
-    cc_annual = {k: max(v * 0.62, 16000) for k, v in instate_annual.items()}
+    instate_annual, _src = _load_instate_costs()
+    base = instate_annual.get(state, 26000)   # annual in-state COA for this state
+
+    # Derived annual figures from the in-state baseline
+    oos_annual = min(base * 1.55, 55000)       # out-of-state premium
+    private_annual = base * 2.05               # private avg roughly 2x public COA
+    cc_annual = max(base * 0.62, 14000)        # community college incl. living costs
 
     return {
-        "In-state public university": instate_annual.get(state, 28000) * 4,
-        "Out-of-state public university": oos_annual.get(state, 45000) * 4,
-        "Private university": private_annual.get(state, 63000) * 4,
-        "Community college (2-year)": cc_annual.get(state, 18000) * 2,
+        "In-state public university": int(base * 4),
+        "Out-of-state public university": int(oos_annual * 4),
+        "Private university": int(private_annual * 4),
+        "Community college (2-year)": int(cc_annual * 2),
     }
+
+def _cost_source_label(lang="en"):
+    _costs, src = _load_instate_costs()
+    if src == "college_scorecard":
+        return ("Cost data: U.S. Dept. of Education College Scorecard, compiled by The 529 Network."
+                if lang == "en" else
+                "Datos de costos: College Scorecard del Departamento de Educación de EE.UU., compilados por The 529 Network.")
+    return ("Cost data: representative College Board figures (illustrative)."
+            if lang == "en" else
+            "Datos de costos: cifras representativas de College Board (ilustrativo).")
 
 def _project_balance(monthly_contribution, years, annual_return):
     """Compound monthly contribution with given annual return."""
@@ -344,7 +423,8 @@ def _inflation_adjusted_cost(base_cost, years, inflation_rate=0.04):
 
 def screen_results():
     logo_bar()
-    top3 = st.session_state.results or []
+    home_plan = st.session_state.get("home_plan")
+    other_plans = st.session_state.get("other_plans", [])
     email = answers.get("email", "")
     state = answers.get("state", "")
     age_str = answers.get("age", "")
@@ -356,7 +436,8 @@ def screen_results():
         st.warning(t(lang, "email_error"))
 
     st.markdown(f"## {t(lang, 'results_heading')}")
-    st.markdown(f"*{t(lang, 'results_subheading')}*")
+    st.markdown(f"*{t(lang, 'neutral_subheading')}*")
+    st.markdown(f'<div class="neutrality-note">{t(lang, "neutrality_disclaimer")}</div>', unsafe_allow_html=True)
 
     for tip in get_context_tips(answers):
         typ = tip.get("type", "info")
@@ -646,70 +727,140 @@ def screen_results():
                     delta="Fully funded ✓" if lang == "en" else "¡Completamente financiado ✓"
                 )
 
+        # ── Years of college covered (savings adequacy framing) ──────────────
+        # Same concept the 529 Intelligence Dashboard uses: balance / annual cost.
+        future_annual_cost = future_cost / (2 if "Community" in school_type_key else 4)
+        if future_annual_cost > 0:
+            years_covered = projected / future_annual_cost
+            total_years = 2 if "Community" in school_type_key else 4
+            years_covered_capped = min(years_covered, total_years)
+            pct = min(100, (projected / future_cost) * 100) if future_cost > 0 else 0
+            if lang == "en":
+                yc_msg = (f"That projected balance covers about **{years_covered:.1f} of {total_years} years** "
+                          f"of {school_type_key.lower()} ({pct:.0f}% of the total cost).")
+            else:
+                yc_msg = (f"Ese saldo proyectado cubre aproximadamente **{years_covered:.1f} de {total_years} años** "
+                          f"({pct:.0f}% del costo total).")
+            bar_html = f"""
+            <div style="margin:6px 0 12px;">
+              <div style="background:#e0e8e0;border-radius:6px;height:22px;width:100%;position:relative;overflow:hidden;">
+                <div style="background:linear-gradient(90deg,#3A8916,#2B650B);height:22px;width:{pct:.0f}%;border-radius:6px;"></div>
+                <div style="position:absolute;top:0;left:0;width:100%;height:22px;display:flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:600;color:#1A1A1A;">{years_covered_capped:.1f} / {total_years} years</div>
+              </div>
+            </div>"""
+            st.markdown(bar_html, unsafe_allow_html=True)
+            st.markdown(yc_msg)
+
         note = (f"Balance projected using ${monthly_input:,}/month at {return_rate*100:.0f}% annual return, compounded monthly. "
-                f"Cost projection for {school_type_key} in {STATE_TAX_DATA.get(state,{}).get('name',state)} assumes 4% annual tuition inflation "
-                f"from a {base_cost//1000}K base (2025 data). For illustrative purposes only — not financial advice."
+                f"Cost projection for {school_type_key} in {STATE_TAX_DATA.get(state,{}).get('name',state)} assumes 4% annual tuition inflation. "
+                f"For illustrative purposes only \u2014 not financial advice."
                 if lang == "en" else
                 f"Saldo proyectado con ${monthly_input:,}/mes al {return_rate*100:.0f}% de rendimiento anual. "
                 f"El costo asume una inflación universitaria del 4% anual. Solo con fines ilustrativos.")
         st.caption(note)
+        st.caption(_cost_source_label(lang))
     else:
         st.info("College is starting soon — focus on stable, low-risk investment options in your plan." if lang == "en"
                 else "La universidad está por comenzar — enfócate en opciones de inversión estables y de bajo riesgo.")
 
-    # ── SECTION 3: TOP PLAN CARDS ─────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown(f"### {t(lang, 'results_heading')}")
+    # ── SECTION 3: HOME STATE PLAN (neutral disclosure, never ranked) ────────
+    from utils.knowledge_base import STATE_TAX_DATA as _STD
+    from utils.scoring import NO_TAX_STATES as _NTS, NO_DEDUCTION_STATES as _NDS
+    home_plan = st.session_state.get("home_plan")
+    other_plans = st.session_state.get("other_plans", [])
+    state_name = _STD.get(state, {}).get("name", state)
 
-    for i, plan in enumerate(top3):
-        rank = i + 1
-        score = plan.get("score", 0)
-        er = plan.get("avg_expense_ratio", 0)
+    st.markdown("---")
+    st.markdown(f"### {t(lang, 'home_plan_heading')}")
+
+    if home_plan:
+        # Choose the right intro based on the state's tax situation
+        if state in _NTS:
+            intro = t(lang, "home_plan_intro_notax", state=state_name)
+        elif state in _NDS:
+            intro = t(lang, "home_plan_intro_nodeduction", state=state_name)
+        else:
+            intro = t(lang, "home_plan_intro_tax", state=state_name)
+        st.markdown(intro)
+
+        er = home_plan.get("avg_expense_ratio", 0)
         er_str = f"{er*100:.2f}%" if er > 0 else "0%"
-        min_c = plan.get("min_contribution", 0)
+        min_c = home_plan.get("min_contribution", 0)
         min_str = t(lang, "no_minimum") if min_c == 0 else f"${min_c:,}"
-        ts = plan.get("estimated_annual_tax_savings", 0)
-        tax_line = (f"\u2705 ~${ts:,.0f}/yr state deduction" if ts > 0
-                    else f"\u2014 {t(lang, 'state_deduction_label')}: {t(lang, 'not_available')}")
-        flags = plan.get("flags", [])
-        badges = badge_html(plan, flags)
-        url = plan.get("enroll_url", "#")
-        expl = plan.get("explanation", plan.get("highlight", ""))
-        bar_w = int(score)
+        rating = home_plan.get("morningstar_rating", "NR")
+        rating_str = rating if rating != "NR" else ("Not rated" if lang == "en" else "Sin calificación")
+        managers = ", ".join(home_plan.get("fund_managers", [])) or "\u2014"
+        ts = home_plan.get("estimated_annual_tax_savings", 0)
+        url = home_plan.get("enroll_url", "#")
+
+        tax_callout = ""
+        if ts > 0:
+            tax_callout = f'<div class="tax-callout">\u2713 {t(lang, "home_plan_tax_callout", amount=ts)}</div>'
 
         card = f"""
-        <div class="plan-card rank-{rank}">
-          <div style="font-size:.8rem;color:#708686;font-weight:600;margin-bottom:2px;">#{rank}</div>
-          <div style="font-size:1.2rem;font-weight:700;color:#2B650B;margin-bottom:4px;">{plan["name"]}</div>
-          <div style="margin-bottom:6px;">{badges}</div>
-          <div class="match-bar-outer"><div class="match-bar-inner" style="width:{bar_w}%;"></div></div>
-          <div style="font-size:.8rem;color:#708686;margin-bottom:8px;">{t(lang,"match_label")}: {score:.0f}/100</div>
-          <div style="font-size:.87rem;color:#444;line-height:1.6;margin-bottom:10px;">{expl}</div>
-          <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:.85rem;margin-bottom:12px;">
-            <div><span style="color:#708686;">{t(lang,"expense_ratio_label")}:</span> <strong>{er_str}</strong></div>
-            <div><span style="color:#708686;">{t(lang,"min_contrib_label")}:</span> <strong>{min_str}</strong></div>
-            <div>{tax_line}</div>
+        <div class="home-plan-card">
+          <span class="home-plan-banner">{t(lang, 'home_plan_heading')}</span>
+          <div style="font-size:1.3rem;font-weight:700;color:#2B650B;margin-bottom:4px;">{home_plan['name']}</div>
+          {tax_callout}
+          <div class="fact-grid">
+            <div><span class="lbl">{t(lang,'plan_facts_fees')}</span><span class="val">{er_str}</span></div>
+            <div><span class="lbl">{t(lang,'plan_facts_min')}</span><span class="val">{min_str}</span></div>
+            <div><span class="lbl">{t(lang,'plan_facts_rating')}</span><span class="val">{rating_str}</span></div>
+            <div><span class="lbl">{t(lang,'plan_facts_managers')}</span><span class="val">{managers}</span></div>
           </div>
-          <div class="enroll-link"><a href="{url}" target="_blank" rel="noopener noreferrer">{t(lang,"enroll_button")} \u2192</a></div>
+          <div class="enroll-link" style="margin-top:8px;"><a href="{url}" target="_blank" rel="noopener noreferrer">{t(lang,'view_plan_button')} \u2192</a></div>
         </div>"""
         st.markdown(card, unsafe_allow_html=True)
+    else:
+        # State sponsors no plan (e.g., Wyoming)
+        st.info(t(lang, "no_home_plan", state=state_name))
+
+    # ── SECTION 3b: OTHER PLANS TO EXPLORE (curated, neutral sort) ───────────
+    if other_plans:
+        st.markdown("---")
+        st.markdown(f"### {t(lang, 'other_plans_heading')}")
+        st.markdown(t(lang, "other_plans_intro"))
+        sort_key = st.session_state.get("other_sort_key", "sorted_by_default")
+        st.caption(t(lang, sort_key))
+
+        for plan in other_plans:
+            er = plan.get("avg_expense_ratio", 0)
+            er_str = f"{er*100:.2f}%" if er > 0 else "0%"
+            min_c = plan.get("min_contribution", 0)
+            min_str = t(lang, "no_minimum") if min_c == 0 else f"${min_c:,}"
+            rating = plan.get("morningstar_rating", "NR")
+            rating_str = rating if rating != "NR" else ("Not rated" if lang == "en" else "Sin calificación")
+            managers = ", ".join(plan.get("fund_managers", [])[:3]) or "\u2014"
+            url = plan.get("enroll_url", "#")
+
+            card = f"""
+            <div class="neutral-plan-card">
+              <div style="font-size:1.1rem;font-weight:700;color:#2B650B;margin-bottom:6px;">{plan['name']}</div>
+              <div class="fact-grid">
+                <div><span class="lbl">{t(lang,'plan_facts_fees')}</span><span class="val">{er_str}</span></div>
+                <div><span class="lbl">{t(lang,'plan_facts_min')}</span><span class="val">{min_str}</span></div>
+                <div><span class="lbl">{t(lang,'plan_facts_rating')}</span><span class="val">{rating_str}</span></div>
+                <div><span class="lbl">{t(lang,'plan_facts_managers')}</span><span class="val">{managers}</span></div>
+              </div>
+              <div class="enroll-link" style="margin-top:6px;"><a href="{url}" target="_blank" rel="noopener noreferrer">{t(lang,'view_plan_button')} \u2192</a></div>
+            </div>"""
+            st.markdown(card, unsafe_allow_html=True)
 
     # ── SECTION 4: TAX BENEFIT CHART ─────────────────────────────────────────
     from utils.scoring import SAVINGS_MIDPOINTS, AGE_TO_HORIZON
     from utils.knowledge_base import STATE_TAX_DATA, STATE_TAX_RATES
     from utils.scoring import NO_TAX_STATES, NO_DEDUCTION_STATES
 
-    if state not in NO_TAX_STATES and state not in NO_DEDUCTION_STATES and top3:
+    if state not in NO_TAX_STATES and state not in NO_DEDUCTION_STATES and home_plan:
         st.markdown("---")
-        tax_title = "Your State Tax Savings Over Time" if lang == "en" else "Tus Ahorros Fiscales Estatales en el Tiempo"
+        tax_title = "Your Home State Tax Benefit Over Time" if lang == "en" else "Tu Beneficio Fiscal Estatal en el Tiempo"
         st.markdown(f"### {tax_title}")
-        tax_sub = (f"Estimated annual state tax savings by choosing your top recommended plan, accumulated over {years_to_enroll} years."
+        tax_sub = (f"If you contribute to your home state plan, here is the estimated state tax benefit accumulated over {years_to_enroll} years."
                    if lang == "en" else
-                   f"Ahorro fiscal estatal anual estimado al elegir tu plan recomendado, acumulado durante {years_to_enroll} años.")
+                   f"Si contribuyes al plan de tu estado, este es el beneficio fiscal estatal estimado acumulado durante {years_to_enroll} años.")
         st.caption(tax_sub)
 
-        top_plan = top3[0]
-        annual_tax_sav = top_plan.get("estimated_annual_tax_savings", 0)
+        annual_tax_sav = home_plan.get("estimated_annual_tax_savings", 0)
 
         if annual_tax_sav > 0 and years_to_enroll > 0:
             import plotly.graph_objects as go
@@ -739,42 +890,20 @@ def screen_results():
             st.plotly_chart(fig2, use_container_width=True)
 
             total_tax_sav = annual_tax_sav * years_to_enroll
-            msg = (f"By saving in **{top_plan['name']}**, you could save an estimated **${total_tax_sav:,.0f}** in state income taxes over {years_to_enroll} years — money that stays invested and compounds."
+            msg = (f"Contributing to **{home_plan['name']}** could provide an estimated **${total_tax_sav:,.0f}** in state income tax benefits over {years_to_enroll} years \u2014 a benefit available specifically because it is your home state plan."
                    if lang == "en" else
-                   f"Ahorrando en **{top_plan['name']}**, podrías ahorrar aproximadamente **${total_tax_sav:,.0f}** en impuestos estatales durante {years_to_enroll} años.")
+                   f"Contribuir a **{home_plan['name']}** podría brindar aproximadamente **${total_tax_sav:,.0f}** en beneficios fiscales estatales durante {years_to_enroll} años \u2014 disponible por ser el plan de tu estado.")
             st.success(msg)
         else:
             st.info("No direct state tax benefit for this plan combination, but federal tax-free growth applies." if lang == "en"
                     else "No hay beneficio fiscal estatal directo para esta combinación, pero el crecimiento libre de impuestos federales aplica.")
 
-    # ── HOW WE RANKED ─────────────────────────────────────────────────────────
-    st.markdown("---")
-    with st.expander(t(lang, "how_we_ranked")):
-        st.markdown(t(lang, "how_we_ranked_body"))
-
-    # ── STATE PLAN NOTE ───────────────────────────────────────────────────────
-    from utils.knowledge_base import STATE_PLAN_IDS, PLAN_BY_ID
-    sp_id = STATE_PLAN_IDS.get(state)
-    top3_ids = [p["id"] for p in top3]
-    if sp_id and sp_id not in top3_ids:
-        sp = PLAN_BY_ID.get(sp_id)
-        if sp:
-            with st.expander(t(lang, "your_state_plan_heading")):
-                sp_ranked = next((p for p in st.session_state.all_results if p["id"] == sp_id), None)
-                if sp_ranked:
-                    sc = sp_ranked.get("score", 0)
-                    msg = (f"Your state's plan, **{sp['name']}**, scored **{sc:.0f}/100** based on your priorities. "
-                           f"It didn't make the top 3 because other plans scored higher on what you value most. "
-                           f"[Visit the plan]({sp.get('enroll_url', '#')}) for full details."
-                           if lang == "en" else
-                           f"El plan de tu estado, **{sp['name']}**, obtuvo **{sc:.0f}/100**. "
-                           f"[Visita el plan]({sp.get('enroll_url', '#')}) para más información.")
-                    st.markdown(msg)
-
     # ── PDF DOWNLOAD ──────────────────────────────────────────────────────────
+    st.markdown("---")
     try:
         from utils.pdf_generator import generate_pdf
-        pdf = generate_pdf(answers, top3, lang)
+        _pdf_plans = ([home_plan] if home_plan else []) + other_plans
+        pdf = generate_pdf(answers, _pdf_plans[:4], lang)
         label = "\U0001F4C4 Download Your PDF Summary" if lang == "en" else "\U0001F4C4 Descargar Resumen PDF"
         st.download_button(label=label, data=pdf, file_name="529_plan_results.pdf",
                           mime="application/pdf", key="dl_pdf")
