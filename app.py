@@ -275,20 +275,26 @@ def screen_questionnaire():
     footer()
 
 def _sort_other_plans(plans, priority_1):
-    """Sort the non-home plans by the OBJECTIVE factor the user prioritized.
-    No composite 'match score' is used \u2014 the user sets the axis, we sort by fact."""
+    """Order the non-home plans so the strongest options surface for the family.
+    The presentation stays neutral (no scores or ranks shown); the caption simply
+    reflects what the family said they care about."""
     from utils.scoring import PRIORITY_MAP
     dim = PRIORITY_MAP.get(priority_1, "")
+    # Plans already carry a merit score from score_plans(); use it as the primary
+    # order so the curated set is genuinely strong, then break ties by the factor
+    # the family prioritized.
+    rating_order = {"Gold": 0, "Silver": 1, "Bronze": 2, "Neutral": 3, "NR": 4}
+    by_score = sorted(plans, key=lambda p: -p.get("score", 0))
     if dim == "fee":
-        return sorted(plans, key=lambda p: p.get("avg_expense_ratio", 1.0)), "sorted_by_fees"
+        ordered = sorted(by_score, key=lambda p: (p.get("avg_expense_ratio", 1.0), -p.get("score", 0)))
+        return ordered, "sorted_by_fees"
     if dim in ("investment", "rating"):
-        rating_order = {"Gold": 0, "Silver": 1, "Bronze": 2, "Neutral": 3, "NR": 4}
-        return (sorted(plans, key=lambda p: (rating_order.get(p.get("morningstar_rating", "NR"), 4),
-                                             p.get("avg_expense_ratio", 1.0))),
-                "sorted_by_rating")
+        ordered = sorted(by_score, key=lambda p: (rating_order.get(p.get("morningstar_rating", "NR"), 4),
+                                                  -p.get("score", 0)))
+        return ordered, "sorted_by_rating"
     if dim == "tax":
-        return sorted(plans, key=lambda p: p["name"]), "sorted_by_tax"
-    return sorted(plans, key=lambda p: p["name"]), "sorted_by_default"
+        return by_score, "sorted_by_tax"
+    return by_score, "sorted_by_default"
 
 def _compute_results():
     from utils.knowledge_base import STATE_PLAN_IDS, PLAN_BY_ID
@@ -911,16 +917,238 @@ def screen_results():
         pass
 
     st.markdown("---")
-    all_url = "https://www.529network.org/529-plans-by-state/"
-    st.markdown(f'<a href="{all_url}" target="_blank" style="color:#3A8916;font-weight:600;">{t(lang,"see_all_plans")} \u2192</a>', unsafe_allow_html=True)
+    if st.button(t(lang, "explore_all_button"), key="open_explorer", type="secondary"):
+        st.session_state.screen = "explorer"
+        st.rerun()
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button(t(lang, "start_over"), key="restart"):
         reset()
     footer()
+
+
+# ── EXPLORER (full, user-driven, neutral by construction) ────────────────────
+def screen_explorer():
+    logo_bar()
+    from utils.knowledge_base import PLAN_DATA, STATE_TAX_DATA, STATE_PLAN_IDS
+    from utils.scoring import _annual_tax_savings
+    answers = st.session_state.get("answers", {})
+    home_state = answers.get("state", "")
+    home_id = STATE_PLAN_IDS.get(home_state)
+
+    # Back to results
+    if st.button(t(lang, "explorer_back"), key="exp_back"):
+        st.session_state.screen = "results"
+        st.rerun()
+
+    st.markdown(f"## {t(lang, 'explorer_heading')}")
+    st.markdown(f"*{t(lang, 'explorer_subheading')}*")
+    st.markdown(f'<div class="neutrality-note">{t(lang, "neutrality_disclaimer")}</div>', unsafe_allow_html=True)
+
+    # Whether to start from the family's profile or show everything
+    show_all = st.session_state.get("exp_show_all", False)
+    cprof1, cprof2 = st.columns([3, 2])
+    with cprof1:
+        if home_state and not show_all:
+            st.caption(t(lang, "explorer_prefiltered", state=STATE_TAX_DATA.get(home_state, {}).get("name", home_state)))
+        else:
+            st.caption(t(lang, "explorer_showing_all"))
+    with cprof2:
+        if home_state:
+            if not show_all and st.button(t(lang, "explorer_show_all"), key="exp_showall_btn"):
+                st.session_state.exp_show_all = True; st.rerun()
+            elif show_all and st.button(t(lang, "explorer_show_mine"), key="exp_showmine_btn"):
+                st.session_state.exp_show_all = False; st.rerun()
+
+    # ── Filters ──────────────────────────────────────────────────────────────
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        state_names = {a: d.get("name", a) for a, d in STATE_TAX_DATA.items()}
+        state_opts = [t(lang, "explorer_any_state")] + [state_names[a] for a in sorted(state_names, key=lambda x: state_names[x])]
+        default_idx = 0
+        if home_state and not show_all:
+            try:
+                default_idx = state_opts.index(state_names.get(home_state, ""))
+            except ValueError:
+                default_idx = 0
+        sel_state_name = st.selectbox(t(lang, "explorer_filter_state"), state_opts, index=default_idx, key="exp_state")
+        sel_state = next((a for a, n in state_names.items() if n == sel_state_name), None)
+    with f2:
+        fee_opts = {
+            t(lang, "explorer_fee_any"): 1.0,
+            "≤ 0.15%": 0.0015, "≤ 0.25%": 0.0025, "≤ 0.50%": 0.0050,
+        }
+        sel_fee_label = st.selectbox(t(lang, "explorer_filter_fee"), list(fee_opts.keys()), key="exp_fee")
+        sel_fee = fee_opts[sel_fee_label]
+    with f3:
+        rating_opts = {
+            t(lang, "explorer_rating_any"): 5,
+            "Bronze+": 2, "Silver+": 1, "Gold only": 0,
+        }
+        sel_rating_label = st.selectbox(t(lang, "explorer_filter_rating"), list(rating_opts.keys()), key="exp_rating")
+        sel_rating = rating_opts[sel_rating_label]
+    with f4:
+        type_opts = {
+            t(lang, "explorer_type_direct"): "direct",
+            t(lang, "explorer_type_advisor"): "advisor",
+            t(lang, "explorer_type_all"): "all",
+        }
+        sel_type_label = st.selectbox(t(lang, "explorer_filter_type"), list(type_opts.keys()), key="exp_type")
+        sel_type = type_opts[sel_type_label]
+
+    # Sort (opens on name = neutral; user can choose merit-style axes)
+    sort_opts = {
+        t(lang, "explorer_sort_name"): "name",
+        t(lang, "explorer_sort_fee"): "fee",
+        t(lang, "explorer_sort_rating"): "rating",
+    }
+    sel_sort_label = st.selectbox(t(lang, "explorer_sort_label"), list(sort_opts.keys()), key="exp_sort")
+    sel_sort = sort_opts[sel_sort_label]
+
+    # ── Apply filters ────────────────────────────────────────────────────────
+    rating_rank = {"Gold": 0, "Silver": 1, "Bronze": 2, "Neutral": 3, "NR": 4}
+    pool = [p for p in PLAN_DATA if not p.get("is_prepaid")]
+    if sel_state:
+        pool = [p for p in pool if p["state"] == sel_state]
+    if sel_fee < 1.0:
+        pool = [p for p in pool if p.get("avg_expense_ratio", 1.0) <= sel_fee]
+    if sel_rating < 5:
+        pool = [p for p in pool if rating_rank.get(p.get("morningstar_rating", "NR"), 4) <= sel_rating]
+    if sel_type != "all":
+        pool = [p for p in pool if p.get("plan_type", "direct") == sel_type]
+
+    if sel_sort == "fee":
+        pool = sorted(pool, key=lambda p: p.get("avg_expense_ratio", 1.0))
+    elif sel_sort == "rating":
+        pool = sorted(pool, key=lambda p: (rating_rank.get(p.get("morningstar_rating", "NR"), 4), p["name"]))
+    else:
+        pool = sorted(pool, key=lambda p: p["name"])
+
+    st.markdown(f"**{len(pool)}** {t(lang, 'explorer_count')}")
+
+    # ── Compare tray ─────────────────────────────────────────────────────────
+    compare = st.session_state.get("exp_compare", [])
+    if compare:
+        st.markdown(f'<div class="tax-callout">{t(lang, "explorer_compare_tray", n=len(compare))}</div>', unsafe_allow_html=True)
+        cc1, cc2 = st.columns([1, 4])
+        with cc1:
+            if st.button(t(lang, "explorer_compare_clear"), key="exp_clear"):
+                st.session_state.exp_compare = []; st.rerun()
+        with cc2:
+            if len(compare) >= 2 and st.button(t(lang, "explorer_compare_show"), key="exp_compare_show", type="primary"):
+                st.session_state.exp_show_compare = True; st.rerun()
+
+    # Comparison table view
+    if st.session_state.get("exp_show_compare") and len(compare) >= 2:
+        _render_comparison(compare, home_state, answers)
+        if st.button(t(lang, "explorer_compare_back"), key="exp_compare_back"):
+            st.session_state.exp_show_compare = False; st.rerun()
+        footer()
+        return
+
+    # ── Plan list (compact cards) ────────────────────────────────────────────
+    if not pool:
+        st.info(t(lang, "explorer_none"))
+    for p in pool:
+        _render_explorer_card(p, home_state, home_id, answers, compare)
+
+    footer()
+
+
+def _render_explorer_card(p, home_state, home_id, answers, compare):
+    from utils.knowledge_base import STATE_TAX_DATA
+    from utils.scoring import _annual_tax_savings
+    er = p.get("avg_expense_ratio", 0)
+    er_str = f"{er*100:.2f}%" if er > 0 else "0%"
+    min_c = p.get("min_contribution", 0)
+    min_str = t(lang, "no_minimum") if min_c == 0 else f"${min_c:,}"
+    rating = p.get("morningstar_rating", "NR")
+    rating_str = rating if rating != "NR" else ("Not rated" if lang == "en" else "Sin calificación")
+    is_home = p["id"] == home_id
+    state_name = STATE_TAX_DATA.get(p["state"], {}).get("name", p["state"])
+
+    # Personalized tax line for the family (only meaningful for their home state or parity)
+    tax_line = ""
+    if home_state:
+        instate = (p["state"] == home_state)
+        ts = _annual_tax_savings(home_state, answers.get("annual_savings", ""), answers.get("income", ""), instate)
+        if ts > 0 and (instate or STATE_TAX_DATA.get(home_state, {}).get("parity")):
+            tax_line = f'<span style="color:#2B650B;font-weight:600;">~${ts:,.0f}/yr {t(lang,"explorer_tax_for_you")}</span>'
+
+    home_badge = f'<span class="home-plan-banner" style="margin-bottom:6px;">{t(lang,"home_plan_heading")}</span><br>' if is_home else ""
+    managers = ", ".join(p.get("fund_managers", [])[:3]) or "\u2014"
+
+    cols = st.columns([5, 1])
+    with cols[0]:
+        card = f"""
+        <div class="neutral-plan-card" style="{'border-color:#3A8916;' if is_home else ''}">
+          {home_badge}
+          <div style="font-size:1.05rem;font-weight:700;color:#2B650B;">{p['name']}</div>
+          <div style="font-size:.78rem;color:#708686;margin-bottom:6px;">{state_name} · {managers}</div>
+          <div class="fact-grid">
+            <div><span class="lbl">{t(lang,'plan_facts_fees')}</span><span class="val">{er_str}</span></div>
+            <div><span class="lbl">{t(lang,'plan_facts_min')}</span><span class="val">{min_str}</span></div>
+            <div><span class="lbl">{t(lang,'plan_facts_rating')}</span><span class="val">{rating_str}</span></div>
+          </div>
+          {('<div style="margin-top:4px;">'+tax_line+'</div>') if tax_line else ''}
+          <div class="enroll-link" style="margin-top:6px;"><a href="{p.get('enroll_url','#')}" target="_blank" rel="noopener noreferrer">{t(lang,'view_plan_button')} \u2192</a></div>
+        </div>"""
+        st.markdown(card, unsafe_allow_html=True)
+    with cols[1]:
+        in_compare = p["id"] in compare
+        disabled = (not in_compare) and len(compare) >= 3
+        label = t(lang, "explorer_remove") if in_compare else t(lang, "explorer_add")
+        if st.button(label, key=f"cmp_{p['id']}", disabled=disabled):
+            if in_compare:
+                st.session_state.exp_compare = [x for x in compare if x != p["id"]]
+            else:
+                st.session_state.exp_compare = compare + [p["id"]]
+            st.rerun()
+
+
+def _render_comparison(compare_ids, home_state, answers):
+    from utils.knowledge_base import PLAN_BY_ID, STATE_TAX_DATA
+    from utils.scoring import _annual_tax_savings
+    st.markdown(f"### {t(lang, 'explorer_compare_heading')}")
+    plans = [PLAN_BY_ID[i] for i in compare_ids if i in PLAN_BY_ID]
+
+    def tax_for(p):
+        if not home_state:
+            return "\u2014"
+        instate = (p["state"] == home_state)
+        ts = _annual_tax_savings(home_state, answers.get("annual_savings", ""), answers.get("income", ""), instate)
+        if ts > 0 and (instate or STATE_TAX_DATA.get(home_state, {}).get("parity")):
+            return f"~${ts:,.0f}/yr"
+        return t(lang, "not_available")
+
+    rows = [
+        [t(lang, "explorer_row_plan")] + [p["name"] for p in plans],
+        [t(lang, "explorer_row_state")] + [STATE_TAX_DATA.get(p["state"], {}).get("name", p["state"]) for p in plans],
+        [t(lang, "plan_facts_fees")] + [f"{p.get('avg_expense_ratio',0)*100:.2f}%" for p in plans],
+        [t(lang, "plan_facts_min")] + [t(lang, "no_minimum") if p.get("min_contribution", 0) == 0 else f"${p['min_contribution']:,}" for p in plans],
+        [t(lang, "plan_facts_rating")] + [p.get("morningstar_rating", "NR") for p in plans],
+        [t(lang, "explorer_row_managers")] + [", ".join(p.get("fund_managers", [])[:3]) for p in plans],
+        [t(lang, "explorer_row_tax")] + [tax_for(p) for p in plans],
+    ]
+    # Build an HTML table for clean rendering
+    html = '<table style="width:100%;border-collapse:collapse;font-size:.88rem;">'
+    for ri, row in enumerate(rows):
+        html += "<tr>"
+        for ci, cell in enumerate(row):
+            if ci == 0:
+                html += f'<td style="padding:8px 10px;background:#f5f7f5;color:#708686;font-weight:600;border:1px solid #e0e8e0;white-space:nowrap;">{cell}</td>'
+            else:
+                weight = "700" if ri == 0 else "400"
+                color = "#2B650B" if ri == 0 else "#1A1A1A"
+                html += f'<td style="padding:8px 10px;border:1px solid #e0e8e0;font-weight:{weight};color:{color};">{cell}</td>'
+        html += "</tr>"
+    html += "</table>"
+    st.markdown(html, unsafe_allow_html=True)
+    st.caption(t(lang, "explorer_compare_note"))
 
 # ── ROUTER ────────────────────────────────────────────────────────────────────
 screen = st.session_state.screen
 if screen == "welcome": screen_welcome()
 elif screen == "questionnaire": screen_questionnaire()
 elif screen == "results": screen_results()
+elif screen == "explorer": screen_explorer()
 else: screen_welcome()

@@ -113,6 +113,11 @@ PLAN_DATA = [
     {"id":"DC_529","name":"DC College Savings Plan (District of Columbia)","state":"DC","morningstar_rating":"Bronze","avg_expense_ratio":0.0030,"min_contribution":0,"fund_managers":["Ascensus","Schwab","JPMorgan"],"open_to_nonresidents":True,"residency_required":False,"is_prepaid":False,"enroll_url":"https://www.dccollegesavings.com","highlight":"DC residents deduct up to $4K/$8K. Multiple low-cost portfolios.","good_for_grandparents":True,"low_minimum":True},
 ]
 
+# Ensure every plan has a plan_type (all current plans are direct-sold;
+# advisor-sold variants can be added later with sourced fee data).
+for _p in PLAN_DATA:
+    _p.setdefault("plan_type", "direct")
+
 PLAN_BY_ID = {p["id"]: p for p in PLAN_DATA}
 STATE_PLAN_IDS = {
     "IL":"IL_BRIGHT_START","UT":"UT_MY529","AK":"AK_TROWEPRICE","MA":"MA_UFUND",
