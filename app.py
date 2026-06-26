@@ -955,23 +955,35 @@ def screen_explorer():
     with cprof2:
         if home_state:
             if not show_all and st.button(t(lang, "explorer_show_all"), key="exp_showall_btn"):
-                st.session_state.exp_show_all = True; st.rerun()
+                st.session_state.exp_show_all = True
+                st.session_state["_exp_state_seed"] = t(lang, "explorer_any_state")
+                st.rerun()
             elif show_all and st.button(t(lang, "explorer_show_mine"), key="exp_showmine_btn"):
-                st.session_state.exp_show_all = False; st.rerun()
+                st.session_state.exp_show_all = False
+                from utils.knowledge_base import STATE_TAX_DATA as _STD2
+                st.session_state["_exp_state_seed"] = _STD2.get(home_state, {}).get("name", home_state)
+                st.rerun()
 
     # ── Filters ──────────────────────────────────────────────────────────────
+    state_names = {a: d.get("name", a) for a, d in STATE_TAX_DATA.items()}
+    any_state_label = t(lang, "explorer_any_state")
+    state_opts = [any_state_label] + [state_names[a] for a in sorted(state_names, key=lambda x: state_names[x])]
+
+    # Seed the State filter's initial value exactly once (or when the user toggles
+    # show-all / show-mine), then let the widget own its own state so user changes stick.
+    seed = st.session_state.pop("_exp_state_seed", None)
+    if seed is not None:
+        st.session_state["exp_state"] = seed
+    elif "exp_state" not in st.session_state:
+        if home_state and not show_all and state_names.get(home_state) in state_opts:
+            st.session_state["exp_state"] = state_names[home_state]
+        else:
+            st.session_state["exp_state"] = any_state_label
+
     f1, f2, f3, f4 = st.columns(4)
     with f1:
-        state_names = {a: d.get("name", a) for a, d in STATE_TAX_DATA.items()}
-        state_opts = [t(lang, "explorer_any_state")] + [state_names[a] for a in sorted(state_names, key=lambda x: state_names[x])]
-        default_idx = 0
-        if home_state and not show_all:
-            try:
-                default_idx = state_opts.index(state_names.get(home_state, ""))
-            except ValueError:
-                default_idx = 0
-        sel_state_name = st.selectbox(t(lang, "explorer_filter_state"), state_opts, index=default_idx, key="exp_state")
-        sel_state = next((a for a, n in state_names.items() if n == sel_state_name), None)
+        sel_state_name = st.selectbox(t(lang, "explorer_filter_state"), state_opts, key="exp_state")
+        sel_state = None if sel_state_name == any_state_label else next((a for a, n in state_names.items() if n == sel_state_name), None)
     with f2:
         fee_opts = {
             t(lang, "explorer_fee_any"): 1.0,
